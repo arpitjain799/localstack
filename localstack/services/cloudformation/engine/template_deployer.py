@@ -10,6 +10,7 @@ import botocore
 from localstack import config
 from localstack.aws.accounts import get_aws_account_id
 from localstack.constants import FALSE_STRINGS
+from localstack.services.cloudformation import usage
 from localstack.services.cloudformation.deployment_utils import (
     PLACEHOLDER_AWS_NO_VALUE,
     fix_boto_parameters_based_on_report,
@@ -73,6 +74,8 @@ def get_deployment_config(res_type):
     resource_class = RESOURCE_MODELS.get(canonical_type)
     if resource_class:
         return resource_class.get_deploy_templates()
+    else:
+        usage.missing_resource_types.record(canonical_type)
 
 
 # FIXME: still too many cases
@@ -647,6 +650,7 @@ def get_resource_model_instance(resource_id: str, stack) -> Optional[GenericBase
     canonical_type = canonical_resource_type(resource_type)
     resource_class = RESOURCE_MODELS.get(canonical_type)
     if not resource_class:
+        # usage.missing_resource_types.record(canonical_type)
         return None
     instance = resource_class(resource)
     return instance
@@ -711,6 +715,9 @@ def execute_resource_action(resource_id: str, stack: "TemplateDeployer", action_
 
     resource = resources[resource_id]
     resource_type = get_resource_type(resource)
+    if action_name == ACTION_CREATE and resource_type:
+        usage.resource_type.record(resource_type)
+
     func_details = get_deployment_config(resource_type)
 
     if not func_details or action_name not in func_details:
