@@ -6,6 +6,9 @@ from urllib.parse import urlparse
 import pytest
 import requests
 from botocore.exceptions import ClientError
+from pytest_httpserver import HTTPServer
+from werkzeug import Request
+from werkzeug import Response as WerkzeugResponse
 
 from localstack import config
 from localstack.aws.accounts import get_aws_account_id
@@ -24,8 +27,7 @@ from tests.integration.apigateway.conftest import DEFAULT_STAGE_NAME
 from tests.integration.awslambda.test_lambda import TEST_LAMBDA_LIBS
 
 
-@pytest.mark.skip_offline
-def test_http_integration(create_rest_apigw, aws_client):
+def test_http_integration(create_rest_apigw, aws_client, httpserver):
     api_id, _, root_id = create_rest_apigw(name="my_api", description="this is my api")
 
     aws_client.apigateway.put_method(
@@ -36,13 +38,21 @@ def test_http_integration(create_rest_apigw, aws_client):
         restApiId=api_id, resourceId=root_id, httpMethod="GET", statusCode="200"
     )
 
+    def _handler(_request: Request) -> WerkzeugResponse:
+        response_content = {"foo": "bar"}
+        return WerkzeugResponse(
+            json.dumps(response_content), mimetype="application/json", status=200
+        )
+
+    httpserver.expect_request("").respond_with_handler(_handler)
+    uri = httpserver.url_for("/")
+
     aws_client.apigateway.put_integration(
         restApiId=api_id,
         resourceId=root_id,
         httpMethod="GET",
         type="HTTP",
-        # TODO: replace httpbin.org requests with httpserver/echo_http_server fixture
-        uri="http://httpbin.org/robots.txt",
+        uri=uri,
         integrationHttpMethod="GET",
     )
 
@@ -53,14 +63,11 @@ def test_http_integration(create_rest_apigw, aws_client):
     response = requests.get(url)
 
     assert response.status_code == 200
+    assert response.json() == {"foo": "bar"}
 
 
-def test_put_integration_responses(aws_client):
-    response = aws_client.apigateway.create_rest_api(name="my_api", description="this is my api")
-    api_id = response["id"]
-
-    resources = aws_client.apigateway.get_resources(restApiId=api_id)
-    root_id = [resource for resource in resources["items"] if resource["path"] == "/"][0]["id"]
+def test_put_integration_responses(aws_client, create_rest_apigw, httpserver: HTTPServer):
+    api_id, _, root_id = create_rest_apigw(name="my_api", description="this is my api")
 
     aws_client.apigateway.put_method(
         restApiId=api_id, resourceId=root_id, httpMethod="GET", authorizationType="none"
@@ -70,13 +77,21 @@ def test_put_integration_responses(aws_client):
         restApiId=api_id, resourceId=root_id, httpMethod="GET", statusCode="200"
     )
 
+    def _handler(_request: Request) -> WerkzeugResponse:
+        response_content = {"foo": "bar"}
+        return WerkzeugResponse(
+            json.dumps(response_content), mimetype="application/json", status=200
+        )
+
+    httpserver.expect_request("").respond_with_handler(_handler)
+    uri = httpserver.url_for("/")
+
     aws_client.apigateway.put_integration(
         restApiId=api_id,
         resourceId=root_id,
         httpMethod="GET",
         type="HTTP",
-        # TODO: replace httpbin.org requests with httpserver/echo_http_server fixture
-        uri="http://httpbin.org/robots.txt",
+        uri=uri,
         integrationHttpMethod="POST",
     )
 
@@ -162,8 +177,7 @@ def test_put_integration_responses(aws_client):
         resourceId=root_id,
         httpMethod="PUT",
         type="HTTP",
-        # TODO: replace httpbin.org requests with httpserver/echo_http_server fixture
-        uri="http://httpbin.org/robots.txt",
+        uri=uri,
         integrationHttpMethod="POST",
     )
 

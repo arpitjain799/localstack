@@ -528,10 +528,7 @@ class HTTPIntegration(BackendIntegration):
     def invoke(self, invocation_context: ApiInvocationContext):
         invocation_path = invocation_context.path_with_query_string
         integration = invocation_context.integration
-        path_params = invocation_context.path_params
-        method = invocation_context.method
         headers = invocation_context.headers
-        relative_path, query_string_params = extract_query_string_params(path=invocation_path)
         uri = integration.get("uri") or integration.get("integrationUri") or ""
 
         if ":servicediscovery:" in uri:
@@ -543,26 +540,40 @@ class HTTPIntegration(BackendIntegration):
             if instance and instance.get("Id"):
                 uri = "http://%s/%s" % (instance["Id"], invocation_path.lstrip("/"))
 
-        # apply custom request template
+        # update context and stage variables
         invocation_context.context = helpers.get_event_request_context(invocation_context)
         invocation_context.stage_variables = helpers.get_stage_variables(invocation_context)
-        request_templates = RequestTemplates()
-        payload = request_templates.render(invocation_context)
+
+        template_key = APPLICATION_JSON
+        if invocation_context.is_websocket_request():
+            if "TemplateSelectionExpression" in integration:
+                tpl_expression = integration.get("TemplateSelectionExpression")
+                if tpl_expression == "\\$default":
+                    template_key = "$default"
+                else:
+                    LOG.info("Template selection expression is not fully supported")
+                    template_key = tpl_expression
+
+        payload = self.request_templates.render(invocation_context, template_key)
 
         if isinstance(payload, dict):
             payload = json.dumps(payload)
 
-        uri = apply_request_parameters(
-            uri,
-            integration=integration,
-            path_params=path_params,
-            query_params=query_string_params,
+        integration_parameters: IntegrationParameters = self.request_params_resolver.resolve(
+            invocation_context
         )
+
+        # integrationMethod is used for HTTP integrations
+        # httpMethod is used for REST integrations
+        method = integration.get("integrationMethod") or integration.get("httpMethod")
+        headers.update(integration_parameters.get("headers"))
+        query_params = integration_parameters.get("querystring")
+        uri = add_query_params_to_url(uri, query_params)
+
         result = requests.request(method=method, url=uri, data=payload, headers=headers)
         # apply custom response template
         invocation_context.response = result
-        response_templates = ResponseTemplates()
-        response_templates.render(invocation_context)
+        self.response_templates.render(invocation_context)
         return invocation_context.response
 
 
