@@ -568,8 +568,12 @@ class HTTPIntegration(BackendIntegration):
         method = integration.get("integrationMethod") or integration.get("httpMethod")
         headers.update(integration_parameters.get("headers"))
         query_params = integration_parameters.get("querystring")
-        uri = add_query_params_to_url(uri, query_params)
+        path_params = integration_parameters.get("path")
 
+        for key, value in path_params.items():
+            uri = uri.replace("{%s}" % key, str(value or ""))
+
+        uri = add_query_params_to_url(uri, query_params)
         result = requests.request(method=method, url=uri, data=payload, headers=headers)
         # apply custom response template
         invocation_context.response = result
