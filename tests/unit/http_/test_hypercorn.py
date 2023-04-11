@@ -16,9 +16,10 @@ from localstack.utils.serving import Server
 
 
 @contextmanager
-def server_context(server: Server):
+def server_context(server: Server, timeout: float = None):
     server.start()
     try:
+        server.wait_is_up(timeout)
         yield server
     finally:
         server.shutdown()
