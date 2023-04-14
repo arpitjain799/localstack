@@ -2,8 +2,10 @@ import base64
 import json
 import logging
 import re
+import time
 from abc import ABC, abstractmethod
 from collections import defaultdict
+from datetime import datetime
 from http import HTTPStatus
 from typing import Any, Dict, List, Union
 from urllib.parse import urljoin
@@ -44,7 +46,7 @@ from localstack.utils.collections import dict_multi_values, remove_attributes
 from localstack.utils.common import make_http_request, to_str
 from localstack.utils.http import add_query_params_to_url, canonicalize_headers, parse_request_data
 from localstack.utils.json import json_safe
-from localstack.utils.strings import camel_to_snake_case, to_bytes
+from localstack.utils.strings import camel_to_snake_case, short_uid, to_bytes
 
 LOG = logging.getLogger(__name__)
 
@@ -183,7 +185,6 @@ class LambdaProxyIntegration(BackendIntegration):
         cls, method, path, headers, data, query_string_params=None, is_base64_encoded=False
     ):
         query_string_params = query_string_params or parse_request_data(method, path, "")
-
         single_value_query_string_params = {
             k: v[-1] if isinstance(v, list) else v for k, v in query_string_params.items()
         }
@@ -201,6 +202,29 @@ class LambdaProxyIntegration(BackendIntegration):
         }
 
     @classmethod
+    def websocket_payload_event(cls, invocation: ApiInvocationContext, payload):
+        return {
+            "body": payload,
+            "isBase64Encoded": invocation.is_data_base64_encoded,
+            "requestContext": {
+                "apiId": invocation.api_id,
+                "connectedAt": int(time.time() * 1000),
+                "connectionId": invocation.connection_id,
+                "domainName": invocation.domain_name,
+                "eventType": "MESSAGE",
+                "extendedRequestId": f"{short_uid()}",
+                "identity": invocation.context.get("identity", {}),
+                "messageDirection": "IN",
+                "messageId": f"{short_uid()}",
+                "requestId": f"{short_uid()}",
+                "requestTime": f"{datetime.utcnow().strftime('%d/%b/%Y:%H:%M:%S +0000')}",
+                "requestTimeEpoch": int(time.time() * 1000),
+                "routeKey": invocation.ws_route,
+                "stage": invocation.stage,
+            },
+        }
+
+    @classmethod
     def process_apigateway_invocation(
         cls,
         func_arn,
@@ -214,27 +238,32 @@ class LambdaProxyIntegration(BackendIntegration):
         if (request_context := invocation_context.context) is None:
             request_context = {}
         try:
-            resource_path = invocation_context.resource_path or path
-            event = cls.construct_invocation_event(
-                invocation_context.method,
-                path,
-                invocation_context.headers,
-                payload,
-                query_string_params,
-                invocation_context.is_data_base64_encoded,
-            )
-            path_params = dict(path_params)
-            cls.fix_proxy_path_params(path_params)
-            event["pathParameters"] = path_params
-            event["resource"] = resource_path
-            event["requestContext"] = request_context
-            event["stageVariables"] = invocation_context.stage_variables
-            LOG.debug(
-                "Running Lambda function %s from API Gateway invocation: %s %s",
-                func_arn,
-                invocation_context.method or "GET",
-                path,
-            )
+            event = {}
+            if invocation_context.is_websocket_request():
+                event = cls.websocket_payload_event(invocation_context, payload)
+            else:
+                resource_path = invocation_context.resource_path or path
+                event = cls.construct_invocation_event(
+                    invocation_context.method,
+                    path,
+                    invocation_context.headers,
+                    payload,
+                    query_string_params,
+                    invocation_context.is_data_base64_encoded,
+                )
+                path_params = dict(path_params)
+                cls.fix_proxy_path_params(path_params)
+                event["pathParameters"] = path_params
+                event["resource"] = resource_path
+                event["requestContext"] = request_context
+                event["stageVariables"] = invocation_context.stage_variables
+                LOG.debug(
+                    "Running Lambda function %s from API Gateway invocation: %s %s",
+                    func_arn,
+                    invocation_context.method or "GET",
+                    path,
+                )
+
             asynchronous = invocation_context.headers.get("X-Amz-Invocation-Type") == "'Event'"
             return call_lambda(
                 function_arn=func_arn, event=to_bytes(json.dumps(event)), asynchronous=asynchronous
@@ -347,7 +376,19 @@ class LambdaIntegration(BackendIntegration):
             invocation_context.context["authorizer"] = invocation_context.authorizer_result
 
         func_arn = self._lambda_integration_uri(invocation_context)
-        event = self.request_templates.render(invocation_context) or b""
+
+        # integration type "AWS" is only supported for WebSocket APIs and REST
+        # API (v1), but the template selection expression is only supported for
+        # Websockets
+        template_key = None
+        if invocation_context.is_websocket_request():
+            template_key = invocation_context.integration.get(
+                "TemplateSelectionExpression", "$default"
+            )
+            event = self.request_templates.render(invocation_context, template_key)
+        else:
+            event = self.request_templates.render(invocation_context)
+
         asynchronous = headers.get("X-Amz-Invocation-Type", "").strip("'") == "Event"
         result = call_lambda(
             function_arn=func_arn, event=to_bytes(event), asynchronous=asynchronous
