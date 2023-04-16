@@ -4,6 +4,7 @@ import logging
 import re
 import time
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Tuple, TypedDict, Union
 from urllib import parse as urlparse
 
@@ -75,6 +76,42 @@ EMPTY_MODEL = "Empty"
 
 def get_apigateway_store(account_id: str = None, region: str = None) -> ApiGatewayStore:
     return apigateway_stores[account_id or get_aws_account_id()][region or aws_stack.get_region()]
+
+
+class PayloadFormatVersion(Enum):
+    V1 = "1.0"
+    V2 = "2.0"
+
+    @staticmethod
+    def is_v1_payload_format_version(integration) -> bool:
+        return (
+                "payloadFormatVersion" not in integration
+                or PayloadFormatVersion(integration["payloadFormatVersion"]) == PayloadFormatVersion.V1
+        )
+
+    @staticmethod
+    def is_v2_payload_format_version(invocation_context: ApiInvocationContext) -> bool:
+        is_aws_proxy_integration = (
+                invocation_context.integration is not None
+                and "payloadFormatVersion" in invocation_context.integration
+        )
+        return (
+                is_aws_proxy_integration
+                and PayloadFormatVersion(invocation_context.integration["payloadFormatVersion"])
+                == PayloadFormatVersion.V2
+        )
+
+    @staticmethod
+    def is_v2_authorizer_payload_format_version(authorizer_config: dict) -> bool:
+        """
+        If we don't specify a payload format version, the AWS Management Console uses the latest
+        version by default
+        """
+        return (
+                authorizer_config.get("authorizerPayloadFormatVersion") is None
+                or authorizer_config.get("authorizerPayloadFormatVersion")
+                == PayloadFormatVersion.V2.value
+        )
 
 
 class Resolver:
@@ -227,7 +264,6 @@ class RequestParametersResolver:
         """
         params: Dict[str, str] = {}
 
-        # TODO: add support for context variables - include in apiinvocationcontext
         # TODO: add support for multi-values headers and multi-values querystring
 
         for k, v in context.query_params().items():
@@ -241,6 +277,9 @@ class RequestParametersResolver:
 
         for k, v in context.stage_variables.items():
             params[f"stagevariables.{k}"] = v
+
+        for k, v in context.context.items():
+            params[f"context.{k}"] = v
 
         if context.data:
             params["method.request.body"] = context.data

@@ -25,8 +25,9 @@ from localstack.services.apigateway.helpers import (
     extract_path_params,
     extract_query_string_params,
     get_event_request_context,
-    make_error_response,
+    make_error_response, PayloadFormatVersion,
 )
+
 from localstack.services.apigateway.templates import (
     MappingTemplates,
     RequestTemplates,
@@ -50,7 +51,7 @@ from localstack.utils.http import (
     parse_request_data,
 )
 from localstack.utils.json import json_safe
-from localstack.utils.strings import camel_to_snake_case, short_uid, to_bytes
+from localstack.utils.strings import camel_to_snake_case, short_uid, to_bytes, is_base64
 
 LOG = logging.getLogger(__name__)
 
@@ -185,6 +186,17 @@ class LambdaProxyIntegration(BackendIntegration):
         path_params["proxy"] = proxy_path_param_value
 
     @classmethod
+    def is_binary_data(cls, content_type, data):
+        if content_type.startswith('text/'):
+            # If the content type starts with "text/", assume it's text data
+            return False
+        elif content_type == 'application/json':
+            return False
+        else:
+            # For all other content types, assume it's binary data
+            return True
+
+    @classmethod
     def construct_invocation_event(
         cls, method, path, headers, data, query_string_params=None, is_base64_encoded=False
     ):
@@ -195,9 +207,11 @@ class LambdaProxyIntegration(BackendIntegration):
         # AWS canonical header names, converting them to lower-case
         headers = header_keys_to_lowercase(headers)
 
-        # if content-type is not application/json, AWS encodes the body as base64
-        if "content-type" not in headers:
-            data = to_str(base64.b64encode(to_bytes(data)))
+        # if content-type is not application/json or content-type is a binary mime-type,
+        # AWS encodes the body as base64
+        if "content-type" not in headers or cls.is_binary_data(headers["content-type"], data):
+            if not is_base64(data):
+                data = to_str(base64.b64encode(to_bytes(data)))
             is_base64_encoded = True
 
         return {
@@ -267,6 +281,10 @@ class LambdaProxyIntegration(BackendIntegration):
                 event["resource"] = resource_path
                 event["requestContext"] = request_context
                 event["stageVariables"] = invocation_context.stage_variables
+                if PayloadFormatVersion.is_v2_payload_format_version(invocation_context) and invocation_context.authorizer_type:
+                    event["requestContext"].update({
+                        "authorizer": { invocation_context.authorizer_type: invocation_context.authorizer_result }
+                    })
                 LOG.debug(
                     "Running Lambda function %s from API Gateway invocation: %s %s",
                     func_arn,
@@ -310,6 +328,7 @@ class LambdaProxyIntegration(BackendIntegration):
         if invocation_context.authorizer_type:
             invocation_context.context["authorizer"] = invocation_context.authorizer_result
 
+        # request template rendering
         payload = self.request_templates.render(invocation_context)
 
         result = self.process_apigateway_invocation(
