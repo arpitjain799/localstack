@@ -8,6 +8,7 @@ from collections import defaultdict
 from datetime import datetime
 from http import HTTPStatus
 from typing import Any, Dict, List, Union
+from urllib import parse
 from urllib.parse import urljoin
 
 import requests
@@ -21,13 +22,13 @@ from localstack.services.apigateway import helpers
 from localstack.services.apigateway.context import ApiInvocationContext
 from localstack.services.apigateway.helpers import (
     IntegrationParameters,
+    PayloadFormatVersion,
     RequestParametersResolver,
     extract_path_params,
     extract_query_string_params,
     get_event_request_context,
-    make_error_response, PayloadFormatVersion,
+    make_error_response,
 )
-
 from localstack.services.apigateway.templates import (
     MappingTemplates,
     RequestTemplates,
@@ -51,7 +52,7 @@ from localstack.utils.http import (
     parse_request_data,
 )
 from localstack.utils.json import json_safe
-from localstack.utils.strings import camel_to_snake_case, short_uid, to_bytes, is_base64
+from localstack.utils.strings import camel_to_snake_case, is_base64, short_uid, to_bytes
 
 LOG = logging.getLogger(__name__)
 
@@ -187,10 +188,10 @@ class LambdaProxyIntegration(BackendIntegration):
 
     @classmethod
     def is_binary_data(cls, content_type, data):
-        if content_type.startswith('text/'):
+        if content_type.startswith("text/"):
             # If the content type starts with "text/", assume it's text data
             return False
-        elif content_type == 'application/json':
+        elif content_type == "application/json":
             return False
         else:
             # For all other content types, assume it's binary data
@@ -198,7 +199,14 @@ class LambdaProxyIntegration(BackendIntegration):
 
     @classmethod
     def construct_invocation_event(
-        cls, method, path, headers, data, query_string_params=None, is_base64_encoded=False
+        cls,
+        method,
+        path,
+        headers,
+        data,
+        query_string_params=None,
+        is_base64_encoded=False,
+        is_payload_v2=False,
     ):
         query_string_params = query_string_params or parse_request_data(method, path, "")
         single_value_query_string_params = {
@@ -209,10 +217,22 @@ class LambdaProxyIntegration(BackendIntegration):
 
         # if content-type is not application/json or content-type is a binary mime-type,
         # AWS encodes the body as base64
-        if "content-type" not in headers or cls.is_binary_data(headers["content-type"], data):
+        content_type = headers.get("content-type", "")
+        if cls.is_binary_data(content_type, data):
             if not is_base64(data):
                 data = to_str(base64.b64encode(to_bytes(data)))
-            is_base64_encoded = True
+            if data:
+                is_base64_encoded = True
+
+        if is_payload_v2:
+            return {
+                "rawPath": path,
+                "rawQueryString": parse.urlencode(query_string_params),
+                "headers": dict(headers),
+                "routeKey": f"{method} {path}",
+                "body": data,
+                "isBase64Encoded": is_base64_encoded,
+            }
 
         return {
             "path": path,
@@ -274,17 +294,32 @@ class LambdaProxyIntegration(BackendIntegration):
                     payload,
                     query_string_params,
                     invocation_context.is_data_base64_encoded,
+                    PayloadFormatVersion.is_v2_payload_format_version(invocation_context),
                 )
                 path_params = dict(path_params)
                 cls.fix_proxy_path_params(path_params)
+                event["version"] = (
+                    "2.0"
+                    if PayloadFormatVersion.is_v2_payload_format_version(invocation_context)
+                    else "1.0"
+                )
                 event["pathParameters"] = path_params
-                event["resource"] = resource_path
+                # xXx clean this up by moving the apigateway_utils.create_integration_payload_event into community
+                if not PayloadFormatVersion.is_v2_payload_format_version(invocation_context):
+                    event["resource"] = resource_path
                 event["requestContext"] = request_context
                 event["stageVariables"] = invocation_context.stage_variables
-                if PayloadFormatVersion.is_v2_payload_format_version(invocation_context) and invocation_context.authorizer_type:
-                    event["requestContext"].update({
-                        "authorizer": { invocation_context.authorizer_type: invocation_context.authorizer_result }
-                    })
+                if (
+                    PayloadFormatVersion.is_v2_payload_format_version(invocation_context)
+                    and invocation_context.authorizer_type
+                ):
+                    event["requestContext"].update(
+                        {
+                            "authorizer": {
+                                invocation_context.authorizer_type: invocation_context.authorizer_result
+                            }
+                        }
+                    )
                 LOG.debug(
                     "Running Lambda function %s from API Gateway invocation: %s %s",
                     func_arn,

@@ -6,7 +6,9 @@ import time
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Tuple, TypedDict, Union
+from urllib import parse
 from urllib import parse as urlparse
+from urllib.parse import parse_qs
 
 from apispec import APISpec
 from botocore.utils import InvalidArnException
@@ -33,6 +35,7 @@ from localstack.utils.aws import resources as resource_utils
 from localstack.utils.aws.arns import parse_arn
 from localstack.utils.aws.aws_responses import requests_error_response_json, requests_response
 from localstack.utils.aws.request_context import MARKER_APIGW_REQUEST_REGION, THREAD_LOCAL
+from localstack.utils.http import header_keys_to_lowercase
 from localstack.utils.strings import long_uid
 from localstack.utils.time import TIMESTAMP_FORMAT_TZ, timestamp
 
@@ -85,20 +88,20 @@ class PayloadFormatVersion(Enum):
     @staticmethod
     def is_v1_payload_format_version(integration) -> bool:
         return (
-                "payloadFormatVersion" not in integration
-                or PayloadFormatVersion(integration["payloadFormatVersion"]) == PayloadFormatVersion.V1
+            "payloadFormatVersion" not in integration
+            or PayloadFormatVersion(integration["payloadFormatVersion"]) == PayloadFormatVersion.V1
         )
 
     @staticmethod
     def is_v2_payload_format_version(invocation_context: ApiInvocationContext) -> bool:
         is_aws_proxy_integration = (
-                invocation_context.integration is not None
-                and "payloadFormatVersion" in invocation_context.integration
+            invocation_context.integration is not None
+            and "payloadFormatVersion" in invocation_context.integration
         )
         return (
-                is_aws_proxy_integration
-                and PayloadFormatVersion(invocation_context.integration["payloadFormatVersion"])
-                == PayloadFormatVersion.V2
+            is_aws_proxy_integration
+            and PayloadFormatVersion(invocation_context.integration["payloadFormatVersion"])
+            == PayloadFormatVersion.V2
         )
 
     @staticmethod
@@ -108,9 +111,9 @@ class PayloadFormatVersion(Enum):
         version by default
         """
         return (
-                authorizer_config.get("authorizerPayloadFormatVersion") is None
-                or authorizer_config.get("authorizerPayloadFormatVersion")
-                == PayloadFormatVersion.V2.value
+            authorizer_config.get("authorizerPayloadFormatVersion") is None
+            or authorizer_config.get("authorizerPayloadFormatVersion")
+            == PayloadFormatVersion.V2.value
         )
 
 
