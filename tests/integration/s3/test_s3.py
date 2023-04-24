@@ -1,4 +1,5 @@
 import base64
+import contextlib
 import datetime
 import gzip
 import hashlib
@@ -1258,9 +1259,6 @@ class TestS3:
         snapshot.match("head_object_second_copy", head_object)
 
     @pytest.mark.aws_validated
-    @pytest.mark.xfail(
-        reason="Behaviour is wrong in moto, does not check the right things, see https://github.com/localstack/localstack/issues/8172"
-    )
     def test_s3_copy_object_in_place(self, s3_create_bucket, snapshot, aws_client):
         snapshot.add_transformer(snapshot.transform.s3_api())
         object_key = "source-object"
@@ -1321,7 +1319,200 @@ class TestS3:
                 ACL="public-read",
             )
         snapshot.match("copy-object-in-place-with-acl", e.value.response)
-        # TODO: add more cases to check
+
+    @pytest.mark.aws_validated
+    def test_s3_copy_object_in_place_accepted_parameters(self, s3_bucket, snapshot, aws_client):
+        # this test will validate every parameter that allows a copy in place
+        # It should be Encryption, Metadata, StorageClass and WebsiteRedirectLocation
+        # all the others would raise InvalidRequest - Copy request illegal
+
+        # TODO: WebsiteRedirectLocation is special, test later
+
+        snapshot.add_transformer(snapshot.transform.s3_api())
+        snapshot.add_transformer(snapshot.transform.key_value("Description"))
+        snapshot.add_transformer(snapshot.transform.key_value("SSEKMSKeyId"))
+        object_key = "source-object"
+
+        resp = aws_client.s3.put_object(
+            Bucket=s3_bucket,
+            Key=object_key,
+            Body='{"key": "value"}',
+            ContentType="application/json",
+            Metadata={"key": "value"},
+            StorageClass=StorageClass.STANDARD,
+            ServerSideEncryption="aws:kms",  # this will use AWS managed key
+        )
+        snapshot.match("put_object", resp)
+
+        head_object = aws_client.s3.head_object(Bucket=s3_bucket, Key=object_key)
+        snapshot.match("head_object", head_object)
+
+        object_attrs = aws_client.s3.get_object_attributes(
+            Bucket=s3_bucket,
+            Key=object_key,
+            ObjectAttributes=["StorageClass"],
+        )
+        snapshot.match("object-attrs", object_attrs)
+
+        # it seems as long as you specify the field necessary, it does not check if the previous value was the same
+        # and allows the copy
+
+        # copy the object with the same StorageClass as the source object
+        resp = aws_client.s3.copy_object(
+            Bucket=s3_bucket,
+            CopySource=f"{s3_bucket}/{object_key}",
+            Key=object_key,
+            StorageClass=StorageClass.STANDARD,
+        )
+        snapshot.match("copy-object-in-place-with-storage-class", resp)
+        object_attrs = aws_client.s3.get_object_attributes(
+            Bucket=s3_bucket,
+            Key=object_key,
+            ObjectAttributes=["StorageClass"],
+        )
+        snapshot.match("object-attrs-after-copy", object_attrs)
+
+        # copy the object with the same Metadata as the source object, it needs MetadataDirective="REPLACE"
+        resp = aws_client.s3.copy_object(
+            Bucket=s3_bucket,
+            CopySource=f"{s3_bucket}/{object_key}",
+            Key=object_key,
+            Metadata={"key": "value"},
+            MetadataDirective="REPLACE",
+        )
+        snapshot.match("copy-object-in-place-with-metadata", resp)
+        head_object = aws_client.s3.head_object(Bucket=s3_bucket, Key=object_key)
+        snapshot.match("head-copy-with-metadata", head_object)
+
+        resp = aws_client.s3.copy_object(
+            Bucket=s3_bucket,
+            CopySource=f"{s3_bucket}/{object_key}",
+            Key=object_key,
+            ServerSideEncryption="aws:kms",
+        )
+        snapshot.match("copy-object-in-place-with-sse", resp)
+        head_object = aws_client.s3.head_object(Bucket=s3_bucket, Key=object_key)
+        snapshot.match("head-copy-with-sse", head_object)
+
+        # this is an edge case, if the source object SSE was not AES256, AWS allows you to not specify any fields
+        # as it will use AES256 by default and is different from the source key
+        resp = aws_client.s3.copy_object(
+            Bucket=s3_bucket,
+            CopySource=f"{s3_bucket}/{object_key}",
+            Key=object_key,
+        )
+        snapshot.match("copy-object-in-place-without-kms-sse", resp)
+        head_object = aws_client.s3.head_object(Bucket=s3_bucket, Key=object_key)
+        snapshot.match("head-copy-without-kms-sse", head_object)
+
+        resp = aws_client.s3.copy_object(
+            Bucket=s3_bucket,
+            CopySource=f"{s3_bucket}/{object_key}",
+            Key=object_key,
+            ServerSideEncryption="AES256",
+        )
+        snapshot.match("copy-object-in-place-with-aes", resp)
+        head_object = aws_client.s3.head_object(Bucket=s3_bucket, Key=object_key)
+        snapshot.match("head-copy-with-aes", head_object)
+
+    @pytest.mark.aws_validated
+    def test_s3_copy_object_in_place_metadata_directive(self, s3_bucket, snapshot, aws_client):
+        snapshot.add_transformer(snapshot.transform.s3_api())
+        object_key = "source-object"
+        resp = aws_client.s3.put_object(
+            Bucket=s3_bucket,
+            Key=object_key,
+            Body='{"key": "value"}',
+            ContentType="application/json",
+            Metadata={"key": "value"},
+        )
+        snapshot.match("put_object", resp)
+
+        head_object = aws_client.s3.head_object(Bucket=s3_bucket, Key=object_key)
+        snapshot.match("head_object", head_object)
+
+        # copy the object with the same Metadata as the source object, it needs MetadataDirective="REPLACE"
+        resp = aws_client.s3.copy_object(
+            Bucket=s3_bucket,
+            CopySource=f"{s3_bucket}/{object_key}",
+            Key=object_key,
+            Metadata={"key2": "value2"},
+            MetadataDirective="REPLACE",
+        )
+        snapshot.match("copy-replace-directive", resp)
+        head_object = aws_client.s3.head_object(Bucket=s3_bucket, Key=object_key)
+        snapshot.match("head-replace-directive", head_object)
+
+        resp = aws_client.s3.copy_object(
+            Bucket=s3_bucket,
+            CopySource=f"{s3_bucket}/{object_key}",
+            Key=object_key,
+            MetadataDirective="COPY",  # this is the default value
+            StorageClass=StorageClass.STANDARD,  # we need to add storage class to make the copy request legal
+        )
+        snapshot.match("copy-copy-directive", resp)
+        head_object = aws_client.s3.head_object(Bucket=s3_bucket, Key=object_key)
+        snapshot.match("head-copy-directive", head_object)
+
+        resp = aws_client.s3.copy_object(
+            Bucket=s3_bucket,
+            CopySource=f"{s3_bucket}/{object_key}",
+            Key=object_key,
+            MetadataDirective="COPY",
+            Metadata={"key3": "value3"},  # assert that this is ignored
+            StorageClass=StorageClass.STANDARD,  # we need to add storage class to make the copy request legal
+        )
+        snapshot.match("copy-copy-directive-ignore", resp)
+        head_object = aws_client.s3.head_object(Bucket=s3_bucket, Key=object_key)
+        snapshot.match("head-copy-directive-ignore", head_object)
+
+        # copy the object with no Metadata as the source object but with REPLACE
+        resp = aws_client.s3.copy_object(
+            Bucket=s3_bucket,
+            CopySource=f"{s3_bucket}/{object_key}",
+            Key=object_key,
+            MetadataDirective="REPLACE",
+        )
+        snapshot.match("copy-replace-directive-empty", resp)
+        head_object = aws_client.s3.head_object(Bucket=s3_bucket, Key=object_key)
+        snapshot.match("head-replace-directive-empty", head_object)
+
+    @pytest.mark.aws_validated
+    def test_s3_copy_object_legal_hold(self, s3_create_bucket, snapshot, aws_client):
+        snapshot.add_transformer(snapshot.transform.s3_api())
+        object_key = "source-object"
+        dest_key = "dest-key"
+        # creating a bucket with ObjectLockEnabledForBucket enables versioning by default, as it's not allowed otherwise
+        # write test for this
+        bucket_name = s3_create_bucket(ObjectLockEnabledForBucket=True)
+
+        resp = aws_client.s3.put_object(
+            Bucket=bucket_name,
+            Key=object_key,
+            Body='{"key": "value"}',
+            ObjectLockLegalHoldStatus="ON",
+        )
+        snapshot.match("put_object", resp)
+
+        head_object = aws_client.s3.head_object(Bucket=bucket_name, Key=object_key)
+        snapshot.match("head_object", head_object)
+
+        resp = aws_client.s3.copy_object(
+            Bucket=bucket_name,
+            CopySource=f"{bucket_name}/{object_key}",
+            Key=dest_key,
+        )
+        snapshot.match("copy-legal-hold", resp)
+        # the destination key did not keep the legal hold from the source key
+        head_object = aws_client.s3.head_object(Bucket=bucket_name, Key=dest_key)
+        snapshot.match("head-dest-key", head_object)
+
+        # disabled the Legal Hold so that the fixture can clean up
+        for key in (object_key, dest_key):
+            with contextlib.suppress(ClientError):
+                aws_client.s3.put_object_legal_hold(
+                    Bucket=bucket_name, Key=key, LegalHold={"Status": "OFF"}
+                )
 
     @pytest.mark.aws_validated
     @pytest.mark.skip_snapshot_verify(paths=["$..ServerSideEncryption"])
